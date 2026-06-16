@@ -105,7 +105,8 @@ def import_jobs_to_db(items):
             job_number = clean(item.get("job_number"))
             job_name = clean(item.get("job_name"))
 
-            if not job_number and not job_name:
+            # Job Number is required for accounting imports.
+            if not job_number:
                 skipped += 1
                 continue
 
@@ -245,4 +246,5 @@ async def import_accounting_file(file: UploadFile = File(...)):
     return result
 
 app.mount("/", StaticFiles(directory=".", html=True), name="static")
+
 
