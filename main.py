@@ -1,11 +1,14 @@
 import os
 from typing import List, Optional
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, UploadFile, File
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text
+from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
+from io import BytesIO
+from openpyxl import load_workbook
+from openpyxl.utils.cell import range_boundaries
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 IMPORT_TOKEN = os.getenv("IMPORT_TOKEN", "")
@@ -81,6 +84,54 @@ app = FastAPI()
 def startup():
     Base.metadata.create_all(bind=engine)
 
+def clean(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+def import_jobs_to_db(items):
+    db = SessionLocal()
+    imported = 0
+    updated = 0
+    skipped = 0
+
+    try:
+        for item in items:
+            ret_notes = clean(item.get("ret_notes"))
+            if ret_notes.lower() == "done":
+                skipped += 1
+                continue
+
+            job_number = clean(item.get("job_number"))
+            job_name = clean(item.get("job_name"))
+
+            if not job_number and not job_name:
+                skipped += 1
+                continue
+
+            job = db.query(Job).filter(Job.job_number == job_number).first() if job_number else None
+
+            if job:
+                updated += 1
+            else:
+                job = Job(job_number=job_number)
+                db.add(job)
+                imported += 1
+
+            job.job_name = job_name
+            job.customer = clean(item.get("customer"))
+            job.pm = clean(item.get("pm"))
+            job.address = clean(item.get("address"))
+            job.city = clean(item.get("city"))
+            job.state_zip = clean(item.get("state_zip"))
+            job.status = job.status or "Active"
+            job.updated_at = datetime.utcnow()
+
+        db.commit()
+        return {"ok": True, "imported": imported, "updated": updated, "skipped": skipped}
+    finally:
+        db.close()
+
 @app.get("/api/health")
 def health():
     return {"ok": True, "app": "Marschel Operations Board"}
@@ -116,53 +167,70 @@ def get_jobs():
 def import_accounting_jobs(payload: ImportPayload, x_import_token: str = Header(default="")):
     if IMPORT_TOKEN and x_import_token != IMPORT_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid import token")
+    return import_jobs_to_db([j.dict() for j in payload.jobs])
 
-    db = SessionLocal()
-    imported = 0
-    updated = 0
-    skipped = 0
+@app.post("/api/import-accounting-file")
+async def import_accounting_file(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Please upload an .xlsx file")
 
-    try:
-        for item in payload.jobs:
-            if (item.ret_notes or "").strip().lower() == "done":
-                skipped += 1
-                continue
+    content = await file.read()
+    wb = load_workbook(BytesIO(content), data_only=True)
 
-            job_number = (item.job_number or "").strip()
-            job_name = (item.job_name or "").strip()
+    ws = None
+    table_ref = None
 
-            if not job_number and not job_name:
-                skipped += 1
-                continue
+    for sheet in wb.worksheets:
+        for tbl in sheet.tables.values():
+            if tbl.name == "AccountingJobs" or tbl.displayName == "AccountingJobs":
+                ws = sheet
+                table_ref = tbl.ref
+                break
+        if ws:
+            break
 
-            job = db.query(Job).filter(Job.job_number == job_number).first() if job_number else None
+    if not ws or not table_ref:
+        raise HTTPException(status_code=400, detail="Could not find Excel table named AccountingJobs")
 
-            if job:
-                updated += 1
-            else:
-                job = Job(job_number=job_number)
-                db.add(job)
-                imported += 1
+    min_col, min_row, max_col, max_row = range_boundaries(table_ref)
 
-            # Accounting-owned fields only.
-            job.job_name = job_name
-            job.customer = (item.customer or "").strip()
-            job.pm = (item.pm or "").strip()
-            job.address = (item.address or "").strip()
-            job.city = (item.city or "").strip()
-            job.state_zip = (item.state_zip or "").strip()
-            job.status = job.status or "Active"
-            job.updated_at = datetime.utcnow()
+    headers = {}
+    for col in range(min_col, max_col + 1):
+        header = clean(ws.cell(row=min_row, column=col).value)
+        if header:
+            headers[header] = col
 
-        db.commit()
+    required = [
+        "Job #",
+        "Job Name Description",
+        "Customer",
+        "Estimator/PM",
+        "Address",
+        "City/County",
+        "State, Zip",
+        "RET NOTES",
+    ]
 
-        return {
-            "ok": True,
-            "imported": imported,
-            "updated": updated,
-            "skipped": skipped,
-        }
-    finally:
-        db.close()
+    missing = [h for h in required if h not in headers]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing headers: {', '.join(missing)}")
+
+    items = []
+    for row in range(min_row + 1, max_row + 1):
+        items.append({
+            "job_number": clean(ws.cell(row=row, column=headers["Job #"]).value),
+            "job_name": clean(ws.cell(row=row, column=headers["Job Name Description"]).value),
+            "customer": clean(ws.cell(row=row, column=headers["Customer"]).value),
+            "pm": clean(ws.cell(row=row, column=headers["Estimator/PM"]).value),
+            "address": clean(ws.cell(row=row, column=headers["Address"]).value),
+            "city": clean(ws.cell(row=row, column=headers["City/County"]).value),
+            "state_zip": clean(ws.cell(row=row, column=headers["State, Zip"]).value),
+            "ret_notes": clean(ws.cell(row=row, column=headers["RET NOTES"]).value),
+        })
+
+    result = import_jobs_to_db(items)
+    result["file"] = file.filename
+    result["rows_read"] = len(items)
+    return result
 
 app.mount("/", StaticFiles(directory=".", html=True), name="static")

@@ -1429,5 +1429,57 @@ function render() {
 
 render();
 </script>
+<!-- MARSCHEL ACCOUNTING IMPORT START -->
+<div id="acct-import-box" style="position:fixed;right:14px;bottom:14px;background:white;border:1px solid #ccc;border-radius:10px;padding:12px;z-index:9999;box-shadow:0 4px 18px rgba(0,0,0,.12);font-family:Arial;font-size:12px;max-width:320px">
+  <div style="font-weight:700;margin-bottom:6px">Accounting Import</div>
+  <input id="acctFileInput" type="file" accept=".xlsx" style="font-size:12px;max-width:290px;margin-bottom:8px">
+  <button onclick="uploadAccountingFile()" style="padding:6px 10px;border-radius:6px;border:1px solid #999;background:#222;color:white;cursor:pointer">Import Accounting Jobs</button>
+  <div id="acctImportStatus" style="margin-top:8px;color:#555;line-height:1.4"></div>
+</div>
+
+<script>
+async function uploadAccountingFile(){
+  const input = document.getElementById('acctFileInput');
+  const status = document.getElementById('acctImportStatus');
+  if(!input.files || !input.files[0]){
+    status.innerText = 'Choose the accounting Excel file first.';
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append('file', input.files[0]);
+
+  status.innerText = 'Importing...';
+
+  try {
+    const res = await fetch('/api/import-accounting-file', {
+      method: 'POST',
+      body: formData
+    });
+
+    const data = await res.json();
+
+    if(!res.ok){
+      status.innerText = 'Import failed: ' + (data.detail || res.statusText);
+      return;
+    }
+
+    status.innerText =
+      'Import Complete\n' +
+      'Rows Read: ' + data.rows_read + '\n' +
+      'New Jobs: ' + data.imported + '\n' +
+      'Updated Jobs: ' + data.updated + '\n' +
+      'Skipped: ' + data.skipped;
+
+    if(typeof openJobBoard === 'function'){
+      setTimeout(openJobBoard, 500);
+    }
+  } catch (err) {
+    status.innerText = 'Import error: ' + err.message;
+  }
+}
+</script>
+<!-- MARSCHEL ACCOUNTING IMPORT END -->
 </body>
 </html>
+
