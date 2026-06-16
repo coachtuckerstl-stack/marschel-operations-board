@@ -118,7 +118,7 @@ body{font-family:var(--font-sans);font-size:13px;color:var(--color-text-primary)
       <h2>Schedule — Mon Jun 9, 2026</h2>
     </div>
     <div style="display:flex;gap:6px">
-      <button class="btn" onclick="showJobBoardModal()"><i class="ti ti-briefcase"></i> Job List</button>
+      <button class="btn" onclick="showJobBoardModal(); setTimeout(()=>loadDatabaseJobsToJobBoard(false),150)"><i class="ti ti-briefcase"></i> Job List</button>
       <button class="btn" onclick="showAddModal('blank')"><i class="ti ti-plus"></i> Manual Job Entry</button>
       <button class="btn btn-primary" onclick="showFinishScheduleModal()"><i class="ti ti-send"></i> Finish Schedule / Email + Text</button>
       <button class="btn" onclick="showEmailListModal()"><i class="ti ti-mail"></i> Email List</button>
@@ -433,7 +433,7 @@ function jobBoardRowHtml(u, i) {
     <input type="number" min="0" value="${escAttr(u.laborersNeeded || '')}" onchange="UPCOMING_LIST[${i}].laborersNeeded=this.value; renderJobListTable()" placeholder="Labor">
     <input type="number" min="0" value="${escAttr(u.operatorsNeeded || '')}" onchange="UPCOMING_LIST[${i}].operatorsNeeded=this.value; renderJobListTable()" placeholder="Ops">
     <input value="${escAttr(u.address || '')}" onchange="UPCOMING_LIST[${i}].address=this.value; renderJobListTable()" placeholder="Address">
-    ${scheduled ? `<span class="badge gg" title="This job is already on the daily schedule">On Schedule</span>` : `<button class="btn btn-sm btn-primary" onclick="addFromList(${i})">Schedule</button>`}
+    ${scheduled ? `<span class="badge gg" title="This job is already on the daily schedule">On Schedule</span>` : `<button class="btn btn-sm btn-primary" onclick="addFromList(${i})">Schedule</button>`} <button class="btn btn-sm btn-danger" onclick="closeUpcomingJob(${i})">Close Job</button>
   </div>`;
 }
 function pmGroupKey(pm) {
@@ -473,7 +473,7 @@ function groupedJobListHtml() {
 }
 function renderJobListTable() {
   const holder = document.getElementById('jobboard-list');
-  if(holder) holder.innerHTML = groupedJobListHtml();
+  if(holder) holder.innerHTML = groupedJobListHtml() + (typeof archivedJobsHtml === "function" ? archivedJobsHtml() : "");
   const fs = document.getElementById('forecast-summary');
   if(fs) fs.innerHTML = forecastSummaryHtml();
 }
@@ -1252,7 +1252,7 @@ function showJobBoardModal() {
     <div class="modal-box" style="max-width:1180px">
       <h3><i class="ti ti-briefcase" style="font-size:14px;margin-right:6px"></i>Job List</h3>
       <p class="section-sub">This is the master job list. Import accounting jobs here, complete the scheduling fields, review manpower strain, then use Schedule to add a job to the daily schedule.</p>
-      <div class="forecast-summary" id="forecast-summary">${forecastSummaryHtml()}</div>
+      <div class="forecast-summary" id="forecast-summary">${forecastSummaryHtml()}</div><div style="display:flex;gap:6px;margin:8px 0;flex-wrap:wrap"><button class="btn btn-sm btn-primary" onclick="loadDatabaseJobsToJobBoard(true)">Load Imported Database Jobs</button></div>
       <div class="import-panel">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">
           <strong style="font-size:12px">Import Accounting Jobs</strong>
@@ -1480,6 +1480,132 @@ async function uploadAccountingFile(){
 }
 </script>
 <!-- MARSCHEL ACCOUNTING IMPORT END -->
+<!-- MARSCHEL DATABASE JOB LIST BRIDGE START -->
+<script>
+let ARCHIVED_LIST = [];
+
+function dbJobToUpcoming(j){
+  return {
+    name: j.job_name || '',
+    num: j.job_number || '',
+    customer: j.customer || '',
+    gc: j.customer || '',
+    pm: j.pm || '',
+    address: [j.address || '', j.city || '', j.state_zip || ''].filter(Boolean).join(', '),
+    startDate: j.start_date || '',
+    dateEntered: j.date_entered || '',
+    durationDays: j.duration_days || '',
+    laborersNeeded: j.laborers_needed || '',
+    operatorsNeeded: j.operators_needed || '',
+    jobType: j.job_type || '',
+    priority: j.priority || '',
+    status: j.status || 'Active'
+  };
+}
+
+async function loadDatabaseJobsToJobBoard(showMessage=true){
+  try {
+    const res = await fetch('/api/jobs');
+    const data = await res.json();
+
+    if(!res.ok || !data.ok){
+      if(showMessage && typeof showToast === 'function') showToast('Could not load database jobs');
+      return;
+    }
+
+    UPCOMING_LIST = (data.jobs || [])
+      .filter(j => String(j.status || 'Active').toLowerCase() !== 'inactive')
+      .map(dbJobToUpcoming);
+
+    ARCHIVED_LIST = (data.jobs || [])
+      .filter(j => String(j.status || '').toLowerCase() === 'inactive')
+      .map(dbJobToUpcoming);
+
+    if(typeof renderJobListTable === 'function') renderJobListTable();
+
+    if(showMessage && typeof showToast === 'function'){
+      showToast('Loaded ' + UPCOMING_LIST.length + ' active jobs from database');
+    }
+  } catch(err) {
+    if(showMessage && typeof showToast === 'function') showToast('Database job load failed: ' + err.message);
+  }
+}
+
+async function closeUpcomingJob(i){
+  const job = UPCOMING_LIST[i];
+  if(!job || !job.num){
+    showToast('Cannot close job without a Job #');
+    return;
+  }
+
+  if(!confirm('Close this job and move it to Archived Jobs?\n\n' + job.name + ' / ' + job.num)){
+    return;
+  }
+
+  const res = await fetch('/api/jobs/' + encodeURIComponent(job.num) + '/inactive', { method: 'POST' });
+  const data = await res.json();
+
+  if(!res.ok || !data.ok){
+    showToast('Could not close job');
+    return;
+  }
+
+  UPCOMING_LIST.splice(i, 1);
+  ARCHIVED_LIST.push(job);
+  renderJobListTable();
+  showToast('Job moved to Archived Jobs');
+}
+
+async function restoreArchivedJob(i){
+  const job = ARCHIVED_LIST[i];
+  if(!job || !job.num){
+    showToast('Cannot restore job without a Job #');
+    return;
+  }
+
+  const res = await fetch('/api/jobs/' + encodeURIComponent(job.num) + '/active', { method: 'POST' });
+  const data = await res.json();
+
+  if(!res.ok || !data.ok){
+    showToast('Could not restore job');
+    return;
+  }
+
+  ARCHIVED_LIST.splice(i, 1);
+  UPCOMING_LIST.push(job);
+  renderJobListTable();
+  showToast('Job restored to active Job List');
+}
+
+function archivedJobsHtml(){
+  if(!ARCHIVED_LIST || !ARCHIVED_LIST.length){
+    return '<div class="pm-empty">No archived jobs.</div>';
+  }
+
+  return `<details class="pm-job-group">
+    <summary><span>Archived Jobs</span><span class="pm-group-count">${ARCHIVED_LIST.length} job${ARCHIVED_LIST.length===1?'':'s'}</span></summary>
+    <div class="pm-job-group-body">
+      <div class="jobboard-row jobboard-head"><div>Forecast</div><div>Job Name</div><div>Job #</div><div>Customer</div><div>PM</div><div>Start</div><div>Entered</div><div>Duration M-F</div><div>Laborers</div><div>Operators</div><div>Address</div><div>Action</div></div>
+      ${ARCHIVED_LIST.map((u,i)=>`<div class="jobboard-row">
+        <div><span class="forecast-pill forecast-gray">ARCH</span></div>
+        <div>${esc(u.name || '')}</div>
+        <div>${esc(u.num || '')}</div>
+        <div>${esc(u.customer || u.gc || '')}</div>
+        <div>${esc(u.pm || '')}</div>
+        <div>${esc(u.startDate || '')}</div>
+        <div>${esc(u.dateEntered || '')}</div>
+        <div>${esc(u.durationDays || '')}</div>
+        <div>${esc(u.laborersNeeded || '')}</div>
+        <div>${esc(u.operatorsNeeded || '')}</div>
+        <div>${esc(u.address || '')}</div>
+        <div><button class="btn btn-sm" onclick="restoreArchivedJob(${i})">Restore</button></div>
+      </div>`).join('')}
+    </div>
+  </details>`;
+}
+</script>
+<!-- MARSCHEL DATABASE JOB LIST BRIDGE END -->
 </body>
 </html>
+
 

@@ -245,6 +245,36 @@ async def import_accounting_file(file: UploadFile = File(...)):
     result["rows_read"] = len(items)
     return result
 
+
+@app.post("/api/jobs/{job_number}/inactive")
+def make_job_inactive(job_number: str):
+    db = SessionLocal()
+    try:
+        job = db.query(Job).filter(Job.job_number == job_number).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        job.status = "Inactive"
+        job.updated_at = datetime.utcnow()
+        db.commit()
+        return {"ok": True, "job_number": job_number, "status": "Inactive"}
+    finally:
+        db.close()
+
+@app.post("/api/jobs/{job_number}/active")
+def make_job_active(job_number: str):
+    db = SessionLocal()
+    try:
+        job = db.query(Job).filter(Job.job_number == job_number).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        job.status = "Active"
+        job.updated_at = datetime.utcnow()
+        db.commit()
+        return {"ok": True, "job_number": job_number, "status": "Active"}
+    finally:
+        db.close()
+
 app.mount("/", StaticFiles(directory=".", html=True), name="static")
+
 
 
