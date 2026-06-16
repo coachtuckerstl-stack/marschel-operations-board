@@ -177,28 +177,39 @@ async def import_accounting_file(file: UploadFile = File(...)):
     content = await file.read()
     wb = load_workbook(BytesIO(content), data_only=True)
 
-    ws = None
-    table_ref = None
+    ws = wb.active
 
-    for sheet in wb.worksheets:
-        for tbl in sheet.tables.values():
-            if tbl.name == "AccountingJobs" or tbl.displayName == "AccountingJobs":
-                ws = sheet
-                table_ref = tbl.ref
-                break
-        if ws:
+    required_headers = [
+        "Job #",
+        "Job Name Description",
+        "Customer",
+        "Estimator/PM",
+        "Address",
+        "City/County",
+        "State, Zip",
+        "RET NOTES",
+    ]
+
+    header_row = None
+    headers = {}
+
+    for row in range(1, min(ws.max_row, 25) + 1):
+        row_headers = {}
+        for col in range(1, ws.max_column + 1):
+            header = clean(ws.cell(row=row, column=col).value)
+            if header:
+                row_headers[header] = col
+
+        if all(h in row_headers for h in required_headers):
+            header_row = row
+            headers = row_headers
             break
 
-    if not ws or not table_ref:
-        raise HTTPException(status_code=400, detail="Could not find Excel table named AccountingJobs")
+    if not header_row:
+        raise HTTPException(status_code=400, detail="Could not find accounting header row with required columns")
 
-    min_col, min_row, max_col, max_row = range_boundaries(table_ref)
-
-    headers = {}
-    for col in range(min_col, max_col + 1):
-        header = clean(ws.cell(row=min_row, column=col).value)
-        if header:
-            headers[header] = col
+    min_row = header_row
+    max_row = ws.max_row
 
     required = [
         "Job #",
@@ -234,3 +245,4 @@ async def import_accounting_file(file: UploadFile = File(...)):
     return result
 
 app.mount("/", StaticFiles(directory=".", html=True), name="static")
+
